@@ -26,7 +26,7 @@ export default function Home() {
         <link rel="icon" href="/icon.png" type="image/png" />
         <meta
           name="description"
-          content="The Internet is full of cool developers; OmeDEV lets you meet them. When you use OmeDEV, we pick someone else at random so you can have a one-on-one chat."
+          content="The Internet is full of people. Ohmegle lets you meet them. When you use Ohmegle, we pick someone else at random so you can have a one-on-one chat."
         />
       </Head>
       <Grid
