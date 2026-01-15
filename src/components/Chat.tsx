@@ -1,264 +1,230 @@
-import {
-  Box,
-  Button,
-  Code,
-  Flex,
-  Grid,
-  Input,
-  Spinner,
-  Text,
-  Textarea,
-  useColorModeValue,
-} from "@chakra-ui/react";
-import {
-  FormEvent,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { Payload, PusherContext } from "../context/pusherContext";
+"use client";
 
-function Chat() {
-  const [newMessage, setNewMessage] = useState("");
-  const [message, setMessage] = useState([{} as Payload]);
-  const [stopCount, setStopCount] = useState(1);
+import { Box, Button, Grid, Input, Text, VStack, useToast } from "@chakra-ui/react";
+import { useContext, useEffect, useState, useRef } from "react";
+import { PusherContext } from "../context/pusherContext";
 
-  const buttonRef = useRef<any>(null);
-  const messageRef = useRef<null | HTMLDivElement>(null);
+export default function Chat() {
+  const toast = useToast();
+  const { channel } = useContext(PusherContext);
 
-  // A random delay to *ATTEMPT* to prevent multiple connections beyond room the limits
-  const delay = Math.floor(Math.random() * 10000 + 1);
+  const [mode, setMode] = useState<"text" | "video">("text");
+  const [messages, setMessages] = useState<{ from: string; text: string }[]>([]);
+  const [status, setStatus] = useState("Looking for someone...");
+  const [input, setInput] = useState("");
+  const [time, setTime] = useState(0);
+  const [isBanned, setIsBanned] = useState(false);
+  const [banTimeLeft, setBanTimeLeft] = useState(0);
 
-  const {
-    sendMessage,
-    joinChannel,
-    channelId,
-    userId,
-    payload,
-    foundUser,
-    userQuit,
-    setUserQuit,
-    setStop,
-    stop,
-    setFoundUser,
-  } = useContext(PusherContext);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
-  useMemo(
-    () =>
-      setMessage((prev: any) => [
-        ...prev,
-        { message: payload.message, user: payload.user },
-      ]),
-    [payload.message, payload.user]
-  );
+  let pc: RTCPeerConnection;
+  let localStream: MediaStream;
 
-  const chatBoxBackground = useColorModeValue("white", "whiteAlpha.200");
-  const borderColor = useColorModeValue("gray.400", "gray.900");
+  // ----------------------
+  // NEXT BUTTON
+  // ----------------------
+  const handleNext = () => {
+    channel?.trigger("client-next");
+    stopVideo();
+    setMessages([]);
+    setStatus("Looking for someone...");
+    setTime(0);
+  };
 
-  function handleStopButton() {
-    setStopCount((prev) => prev + 1);
-    setStop(true);
-    setFoundUser(false);
+  // ----------------------
+  // TEXT MESSAGES
+  // ----------------------
+  const sendMessage = () => {
+    if (!input) return;
+    channel?.trigger("client-message", input);
+    setMessages((m) => [...m, { from: "you", text: input }]);
+    setInput("");
+  };
 
-    if (stopCount > 1) {
-      window.location.reload();
-    } else if (userQuit) {
-      window.location.reload();
-    }
-  }
+  // ----------------------
+  // REPORT BUTTON
+  // ----------------------
+  const captureReportFrame = () => {
+    if (!remoteVideoRef.current) return null;
+    const video = remoteVideoRef.current;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.8);
+  };
 
-  async function onSubmit(event: FormEvent) {
-    event.preventDefault();
-    if (!newMessage.trim()) {
-      return;
-    }
-    await sendMessage(newMessage);
+  const reportUser = () => {
+    const screenshot = captureReportFrame();
+    if (!screenshot) return toast({ title: "No video to capture", status: "error", duration: 2000 });
 
-    setNewMessage("");
-  }
-
-  if (typeof window !== "undefined") {
-    window.addEventListener("keydown", (e) => {
-      if (e.code === "Escape") {
-        e.preventDefault();
-        handleStopButton();
-        return;
-      }
+    channel?.trigger("client-report", {
+      screenshot,
+      reason: "Inappropriate behavior",
+      timestamp: Date.now()
     });
-  }
+    toast({ title: "User reported", status: "success", duration: 2000 });
+  };
+
+  // ----------------------
+  // BAN SYSTEM
+  // ----------------------
+  useEffect(() => {
+    if (!channel) return;
+    channel.bind("banned", (duration: number) => {
+      setIsBanned(true);
+      setBanTimeLeft(duration);
+      setStatus(`You are banned (${formatTime(duration)})`);
+    });
+  }, [channel]);
 
   useEffect(() => {
-    if (messageRef.current) {
-      messageRef.current.scrollIntoView({
-        behavior: "smooth",
+    if (!isBanned) return;
+    const interval = setInterval(() => {
+      setBanTimeLeft((t) => {
+        if (t <= 1) {
+          setIsBanned(false);
+          setStatus("Looking for someone...");
+          clearInterval(interval);
+          return 0;
+        }
+        setStatus(`You are banned (${formatTime(t - 1)})`);
+        return t - 1;
       });
-    }
-  }, [payload.message, userQuit]);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isBanned]);
 
+  // ----------------------
+  // SESSION TIMER
+  // ----------------------
   useEffect(() => {
-    setTimeout(() => joinChannel(), delay);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (status !== "Connected to stranger") return;
+    const timer = setInterval(() => setTime((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, [status]);
 
-  // if (typeof window !== "undefined") {
-  //   window.addEventListener("beforeunload", (e) => {
-  //     e.returnValue = "Are you sure you want to leave? You will lose your chat";
-  //   });
-  // }
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, "0");
+    const s = (seconds % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  };
 
+  // ----------------------
+  // VIDEO CHAT
+  // ----------------------
+  const initVideo = async () => {
+    if (!remoteVideoRef.current || !localVideoRef.current) return;
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localVideoRef.current.srcObject = localStream;
+
+    pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+    pc.ontrack = (e) => {
+      remoteVideoRef.current!.srcObject = e.streams[0];
+    };
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) channel?.trigger("client-ice", e.candidate);
+    };
+
+    channel?.bind("client-offer", async (offer) => {
+      await pc.setRemoteDescription(offer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      channel.trigger("client-answer", answer);
+    });
+
+    channel?.bind("client-answer", async (answer) => {
+      await pc.setRemoteDescription(answer);
+    });
+
+    channel?.bind("client-ice", async (candidate) => {
+      await pc.addIceCandidate(candidate);
+    });
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    channel?.trigger("client-offer", offer);
+  };
+
+  const stopVideo = () => {
+    if (localStream) localStream.getTracks().forEach((t) => t.stop());
+    if (pc) pc.close();
+  };
+
+  // ----------------------
+  // Pusher EVENTS
+  // ----------------------
+  useEffect(() => {
+    if (!channel) return;
+
+    channel.bind("matched", async () => {
+      setStatus("Connected to stranger");
+      if (mode === "video") await initVideo();
+    });
+
+    channel.bind("client-message", (msg: string) => {
+      setMessages((m) => [...m, { from: "stranger", text: msg }]);
+    });
+
+    channel.bind("client-disconnect", () => {
+      setStatus("Stranger disconnected");
+      if (mode === "video") stopVideo();
+    });
+
+    return () => {
+      if (mode === "video") stopVideo();
+    };
+  }, [channel]);
+
+  // ----------------------
+  // RENDER
+  // ----------------------
   return (
-    <Grid
-      width="100%"
-      templateRows="1fr 90px"
-      minHeight="100%"
-      maxWidth="1440px"
-      margin="0 auto"
-      gap={"2"}
-      p={{ md: "4", base: "0" }}
-    >
-      <Box
-        borderTopRadius={{ md: 10, base: "unset" }}
-        backgroundColor={chatBoxBackground}
-        border="1px solid"
-        borderColor={borderColor}
-        height="100%"
-        position={"relative"}
-        overflow="hidden"
-      >
-        <Box
-          overflowY="auto"
-          position="absolute"
-          inset={0}
-          px={3}
-          py={2}
-          lineHeight={1.6}
-        >
-          {/* <Box mb={4}>
-            <Text fontWeight="bold">** DEBUG **</Text>
-            <Text>
-              My ID: <Code as="span">{userId}</Code>{" "}
-            </Text>
-            <Text>
-              Room ID: <Code as="span">{channelId}</Code>
-            </Text>
-          </Box> */}
-
-          {foundUser ? (
-            <Text fontSize="sm" fontWeight="bold">
-              You&apos;re now chatting with a random developer.
-            </Text>
-          ) : !userQuit && !stop ? (
-            <Flex>
-              <Spinner mr={2} />
-              <Text fontSize="sm" fontWeight="bold">
-                Looking for someone you can chat with...
-              </Text>
-            </Flex>
-          ) : (
-            <Text fontSize="sm" fontWeight="bold">
-              You&apos;re now chatting with a random developer.
-            </Text>
-          )}
-
-          {message.map((msg: any, index) => (
-            <Box key={index}>
-              {msg?.user !== userId && msg?.user?.length > 0 ? (
-                <Text as="strong" color="red.400">
-                  Developer:{" "}
-                </Text>
-              ) : (
-                msg?.user?.length > 0 && (
-                  <Text as="strong" color="blue.400">
-                    You:{" "}
-                  </Text>
-                )
-              )}
-              {msg?.message?.length > 0 && (
-                <Text ref={messageRef} display="inline-block">
-                  {msg?.message}
-                </Text>
-              )}
-            </Box>
-          ))}
-
-          {userQuit ? (
-            <Text fontSize="sm" fontWeight="bold">
-              Developer has disconnected!
-            </Text>
-          ) : (
-            stop && (
-              <Text fontSize="sm" fontWeight="bold">
-                You have disconnected!
-              </Text>
-            )
-          )}
-        </Box>
+    <Box bg="black" color="white" minH="100vh" display="flex" flexDirection="column">
+      <Box bg="gray.800" p={2} textAlign="center">
+        {status} {status === "Connected to stranger" && `| ${formatTime(time)}`}
       </Box>
 
-      <Flex gap={2} as="form" onSubmit={onSubmit}>
-        <Button
-          ref={buttonRef}
-          width={"150px"}
-          borderRadius="none"
-          borderBottomLeftRadius={{ md: 10, base: "unset" }}
-          flexDir="column"
-          blockSize="100%"
-          border={"1px solid"}
-          borderColor={borderColor}
-          color={stop || userQuit ? "white" : "unset"}
-          backgroundColor={stop || userQuit ? "blue.500" : chatBoxBackground}
-          gap={1}
-          onClick={handleStopButton}
-          type="button"
-        >
-          {stop || userQuit ? <Text>New</Text> : <Text>Stop</Text>}
-          <Text
-            display={{ md: "unset", base: "none" }}
-            fontFamily="monospace"
-            fontSize="sm"
-            color="blue.300"
-          >
-            Esc
-          </Text>
-        </Button>
-        <Input
-          variant="unstyled"
-          px={2}
-          pb={10}
-          height="100%"
-          resize="none"
-          border={"1px solid"}
-          borderRadius="none"
-          borderColor={borderColor}
-          backgroundColor={chatBoxBackground}
-          onChange={(e) => setNewMessage(e.target.value)}
-          value={newMessage}
-          disabled={!foundUser}
-        />
-        <Button
-          display={{ md: "flex", base: "none" }}
-          width={"150px"}
-          borderRadius="none"
-          borderBottomRightRadius={10}
-          flexDir="column"
-          blockSize="100%"
-          border={"1px solid"}
-          borderColor={borderColor}
-          backgroundColor={chatBoxBackground}
-          type="submit"
-          disabled={!foundUser}
-          gap={1}
-        >
-          <Text>Send</Text>
-          <Text fontFamily="monospace" fontSize="sm" color="blue.300">
-            Enter
-          </Text>
-        </Button>
-      </Flex>
-    </Grid>
+      {mode === "text" && (
+        <VStack flex="1" overflowY="auto" p={4} spacing={2} align="stretch">
+          {messages.map((m, idx) => (
+            <Text key={idx} textAlign={m.from === "you" ? "right" : "left"} bg="gray.700" p={2} borderRadius={4}>
+              {m.text}
+            </Text>
+          ))}
+        </VStack>
+      )}
+
+      {mode === "video" && (
+        <Grid templateColumns="1fr 1fr" gap={4} flex="1" p={4}>
+          <video ref={localVideoRef} autoPlay muted style={{ borderRadius: 8, width: "100%" }} />
+          <video ref={remoteVideoRef} autoPlay style={{ borderRadius: 8, width: "100%" }} />
+        </Grid>
+      )}
+
+      <Box p={4} bg="gray.800" display="flex" gap={2}>
+        {mode === "text" && (
+          <>
+            <Input
+              flex="1"
+              bg="gray.700"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+            />
+            <Button colorScheme="blue" onClick={sendMessage}>Send</Button>
+          </>
+        )}
+        <Button colorScheme="red" onClick={handleNext}>Next</Button>
+        <Button colorScheme="yellow" onClick={reportUser}>Report</Button>
+      </Box>
+    </Box>
   );
 }
-
-export default Chat;
